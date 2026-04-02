@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+okagents.db
+bot.log
+nohup.out
+.env

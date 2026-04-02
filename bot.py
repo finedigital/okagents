@@ -98,6 +98,8 @@ async def handle_message(update: Update, context):
         text.lower(),
     )
 
+    logger.info("Message text: %r | Trade match: %s", text, trade_match.groups() if trade_match else None)
+
     if trade_match:
         action, amount, token = trade_match.groups()
         usd_amount = float(amount)

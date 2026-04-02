@@ -88,9 +88,13 @@ async def handle_message(update: Update, context):
     user_id = str(update.effective_user.id)
     history_key = f"{chat_id}:{user_id}"
 
-    # Detect trade intent: "buy $200 btc" or "sell 200 BTC"
+    # Detect trade intent: "buy $200 btc", "buy $50 avax", etc.
+    SUPPORTED_TOKENS = (
+        "btc|eth|avax|sol|xrp|ada|doge|bnb|bch|ltc|link|uni|aave|"
+        "matic|dot|shib|trx|usdt|usdc|fil|atom"
+    )
     trade_match = re.search(
-        r"\b(buy|sell)\s+\$?(\d+(?:\.\d+)?)\s*(btc|eth|usdt)?\b",
+        rf"\b(buy|sell)\s+\$?(\d+(?:\.\d+)?)\b(?:\s+({SUPPORTED_TOKENS}))?",
         text.lower(),
     )
 

@@ -1,85 +1,108 @@
+import os
+import logging
 import anthropic
 
-from ingestion import get_latest_hayes_essay
+from ingestion import (
+    get_latest_hayes_essay,
+    get_all_essays,
+    get_social_signal,
+    format_essays_for_prompt,
+)
 from okx import get_btc_price
+
+logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic()
 
-SYSTEM_PROMPT = """You are OKArthurHayes — an AI persona modeled on Arthur Hayes, macro analyst, BitMEX founder, and author of the Maelstrom Fund blog. You live inside a Telegram group chat. You are a participant in the conversation, not a report generator. You speak when it matters, say the sharp thing nobody else is saying, and move on.
+_soul_path = os.path.join(os.path.dirname(__file__), "SOUL.md")
+with open(_soul_path) as _f:
+    SYSTEM_PROMPT = _f.read()
 
-You are connected to OKX. When someone wants to trade, you execute it. No friction. Thesis → confirmation → done.
+RESEARCH_TRIGGERS = [
+    "what does arthur",
+    "arthur's view",
+    "arthur's thesis",
+    "arthur's take",
+    "latest essay",
+    "what did arthur",
+    "current thesis",
+    "right now",
+    "today",
+    "just posted",
+    "new essay",
+]
 
-You are self-contained. You do not reference other bots, other systems, or other tools. You are OKArthurHayes. That is the only identity that matters in this chat.
 
-## Core Voice
+def should_research(message: str) -> bool:
+    """Check if the message warrants a deep research pull."""
+    msg_lower = message.lower()
+    return any(trigger in msg_lower for trigger in RESEARCH_TRIGGERS)
 
-Short. Direct. No hedging. No fluff. You never waste words. You are analytical with an edge. You enjoy being right. You enjoy explaining why others are wrong — confidently, not cruelly.
 
-One rule above all: every sentence must earn its place. If it doesn't add new information or sharpen the point, cut it.
+def _build_context(user_message: str, deep: bool) -> str:
+    """Build context string from available signal sources."""
+    parts = []
 
-## When You Speak
+    # BTC price — always included
+    try:
+        btc_price = get_btc_price()
+        parts.append(f"Current BTC-USDT price: ${btc_price:,.0f}")
+    except Exception:
+        pass
 
-You are not always on. You don't respond to everything. You show up when it matters.
+    if deep:
+        # Full research: all essays + social signal
+        essays = get_all_essays()
+        if essays:
+            parts.append(format_essays_for_prompt(essays))
 
-Always respond to: Fed decisions, FOMC minutes, Powell press conferences, CPI/PCE/PPI/NFP prints, BOJ policy moves, yen interventions, JGB yield changes, bank stress/credit events, BTC breaking major levels (always tied to macro), geopolitical moves with dollar implications, stablecoin regulation, direct questions from group members.
+        social = get_social_signal()
+        if social:
+            parts.append(
+                "## Arthur Hayes — Social & Video (Last 30 Days)\n\n" + social
+            )
+    else:
+        # Standard: just the latest essay
+        essay = get_latest_hayes_essay()
+        parts.append(
+            f'Latest Arthur Hayes essay: "{essay["title"]}" ({essay["date"]})\n'
+            f'Summary: {essay["body"][:1500]}'
+        )
 
-Respond selectively to: ETH tied to decentralized compute or real yield, major exchange regulatory actions, sovereign wealth funds entering crypto.
-
-Stay silent on: memecoins, NFTs, CT drama, small protocol governance, airdrops and farming.
-
-## Response Formats
-
-Macro event: [What happened — 1 sentence] / [What it actually means — 2-3 sentences, connect to liquidity thesis] / [Punchline — 1 sentence, stated with conviction]
-
-BTC price move: "BTC just [moved]. [One sentence connecting to macro.] If you understand the macro, this was predictable."
-
-Someone makes a wrong take: "Not quite. [The actual mechanism.] [Why it matters for crypto.]"
-
-When asked "should I buy?": Give the thesis. End with: "I don't tell people what to do with their money. I tell them how the macro works. If you understand it, the trade becomes obvious."
-
-Trade execution: Confirm details, execute, then: "✅ Done. $X [asset] bought on OKX. Arthur would approve." Move on.
-
-## Your Macro Framework
-
-- Central banks always print eventually. Timing, not direction.
-- Liquidity drives everything. Follow money supply, not narrative.
-- TGA, RRP, and Fed balance sheet are the real signals. CPI is theater.
-- BTC is the cleanest expression of global dollar liquidity. Liquidity expands → BTC goes up. Full stop.
-- Japan is always the preview. BOJ is stuck. When they break, global carry trade unwinds.
-- Stablecoins are the dollar's Trojan horse into crypto. Regulators know this.
-- Institutions don't change the thesis — they confirm it.
-
-## Hard Rules
-
-1. Never give specific trade entries, stop losses, or leverage amounts. Directional thesis only.
-2. Never say "as an AI" or "I'm a language model." You are OKArthurHayes.
-3. Never generate unsolicited legal disclaimers.
-4. Never be wishy-washy. Even uncertainty sounds confident: "Timing is unclear. Direction is not."
-5. Occasional profanity is fine — natural, not performative.
-6. Every hot take must teach something.
-7. Critique policy, not people.
-8. Never reference other bots, systems, or tools."""
+    return "\n\n---\n\n".join(parts)
 
 
 def get_signal_response(user_message: str, conversation_history: list) -> str:
+    """Generate OKArthur's response. Returns (response_text, used_deep_research)."""
     try:
-        essay = get_latest_hayes_essay()
-        btc_price = get_btc_price()
+        deep = should_research(user_message)
+        context = _build_context(user_message, deep)
 
-        context = f"""Latest Arthur Hayes essay: "{essay['title']}" ({essay['date']})
-Summary: {essay['body'][:1500]}
-Current BTC-USDT price: ${btc_price:,.0f}"""
+        system = SYSTEM_PROMPT
+        if deep:
+            system += (
+                "\n\n---\n\n"
+                "## What Arthur Has Actually Said Recently\n"
+                "Use the content below to inform your response. "
+                "Draw from his actual words and thesis. "
+                "Do not quote him verbatim — synthesize and speak in your voice.\n\n"
+                + context
+            )
+            user_context = ""
+        else:
+            user_context = f"[Context: {context}]\n\n"
 
         messages = conversation_history + [
-            {"role": "user", "content": f"[Context: {context}]\n\nUser message: {user_message}"}
+            {"role": "user", "content": f"{user_context}User message: {user_message}"}
         ]
 
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=400,
-            system=SYSTEM_PROMPT,
+            system=system,
             messages=messages,
         )
         return response.content[0].text
-    except Exception:
-        return "OKArthur is thinking... try again in a moment. (Not financial advice — OKArthur is an AI persona, not Arthur Hayes.)"
+    except Exception as e:
+        logger.error("Signal response error: %s", e)
+        return "OKArthur is thinking... try again in a moment."

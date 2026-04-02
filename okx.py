@@ -8,9 +8,14 @@ import requests
 BASE = "https://us.okx.com"
 
 
-def get_btc_price():
-    r = requests.get(f"{BASE}/api/v5/market/ticker?instId=BTC-USDT")
+def get_token_price(token: str) -> float:
+    inst_id = f"{token.upper()}-USDT"
+    r = requests.get(f"{BASE}/api/v5/market/ticker?instId={inst_id}")
     return float(r.json()["data"][0]["last"])
+
+
+def get_btc_price() -> float:
+    return get_token_price("BTC")
 
 
 def _sign(ts, method, path, body, secret):

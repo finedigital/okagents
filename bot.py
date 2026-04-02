@@ -9,8 +9,8 @@ from telegram.ext import (
     filters,
 )
 
-from agent import get_signal_response
-from okx import place_market_buy, get_btc_price
+from agent import get_signal_response, should_research
+from okx import place_market_buy, get_token_price
 from db import init_db, save_user, get_user
 import config
 
@@ -88,20 +88,35 @@ async def handle_message(update: Update, context):
     user_id = str(update.effective_user.id)
     history_key = f"{chat_id}:{user_id}"
 
-    # Detect trade intent: "buy $200 btc", "buy $50 avax", etc.
+    # Detect trade intent: "buy $200 btc", "buy $50 in avax", "sell avax $50", etc.
     SUPPORTED_TOKENS = (
         "btc|eth|avax|sol|xrp|ada|doge|bnb|bch|ltc|link|uni|aave|"
         "matic|dot|shib|trx|usdt|usdc|fil|atom"
     )
+
+    # Phase A: detect action + amount
     trade_match = re.search(
-        rf"\b(buy|sell)\s+\$?(\d+(?:\.\d+)?)\b(?:\s+({SUPPORTED_TOKENS}))?",
-        text.lower(),
+        r"\b(buy|sell)\b.*?\$?(\d+(?:\.\d+)?)", text.lower()
     )
 
-    logger.info("Message text: %r | Trade match: %s", text, trade_match.groups() if trade_match else None)
+    # Phase B: detect token anywhere in message as a standalone word
+    token = None
+    if trade_match:
+        token_matches = re.findall(rf"\b({SUPPORTED_TOKENS})\b", text.lower())
+        for t in token_matches:
+            if t not in ("usdt", "usdc"):
+                token = t
+                break
+
+    logger.info(
+        "Message text: %r | Trade match: %s | Token: %s",
+        text,
+        trade_match.groups() if trade_match else None,
+        token,
+    )
 
     if trade_match:
-        action, amount, token = trade_match.groups()
+        action, amount = trade_match.groups()
         usd_amount = float(amount)
 
         if usd_amount < MIN_TRADE_USD or usd_amount > MAX_TRADE_USD:
@@ -110,8 +125,23 @@ async def handle_message(update: Update, context):
             )
             return
 
-        inst_id = f"{(token or 'BTC').upper()}-USDT"
-        price = get_btc_price()
+        if token is None:
+            await update.message.reply_text(
+                "\u26a0\ufe0f Couldn't identify the token. "
+                'Please specify, e.g. "buy $50 avax" or "sell $200 btc".'
+            )
+            return
+
+        inst_id = f"{token.upper()}-USDT"
+
+        try:
+            price = get_token_price(token)
+        except Exception:
+            await update.message.reply_text(
+                f"\u26a0\ufe0f Couldn't fetch price for {token.upper()}-USDT. "
+                "Check the token and try again."
+            )
+            return
 
         pending_trades[f"{chat_id}:{user_id}"] = {
             "inst_id": inst_id,
@@ -132,14 +162,22 @@ async def handle_message(update: Update, context):
             ]
         ]
 
+        price_fmt = f"${price:,.2f}" if price < 10 else f"${price:,.0f}"
         await update.message.reply_text(
             f"\U0001f7e0 OKArthur: Confirm {action} ${amount} "
-            f"{inst_id.split('-')[0]} at ${price:,.0f} on OKX?",
+            f"{inst_id.split('-')[0]} at {price_fmt} on OKX?",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
     else:
         # Signal request — run OKArthur
         history = conversations.get(history_key, [])
+
+        # Send placeholder if deep research is needed (takes 1-3 min)
+        if should_research(text):
+            placeholder = await update.message.reply_text(
+                "\U0001f7e0 OKArthur: Researching Arthur's latest... one moment."
+            )
+
         response = get_signal_response(text, history)
         conversations[history_key] = (
             history
@@ -148,12 +186,19 @@ async def handle_message(update: Update, context):
                 {"role": "assistant", "content": response},
             ]
         )[-10:]  # Keep last 5 turns
-        await update.message.reply_text(f"\U0001f7e0 OKArthur: {response}")
+
+        if should_research(text):
+            await placeholder.edit_text(f"\U0001f7e0 OKArthur: {response}")
+        else:
+            await update.message.reply_text(f"\U0001f7e0 OKArthur: {response}")
 
 
 async def handle_callback(update: Update, context):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        return
 
     action, chat_id, user_id = query.data.split(":")
 
